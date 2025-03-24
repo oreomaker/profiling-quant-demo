@@ -12,6 +12,7 @@ from utils.quantization_simulation import (
     quantize_phi_like,
     quantize_mixtral,
     quantize_falcon_like,
+    quantize_qwen2vl_like
 )
 
 
@@ -40,11 +41,11 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str)
     parser.add_argument(
         "--model_type",
-        choices=["llama", "qwen1", "qwen2", "gemma", "phi", "opt", "mixtral", "falcon"],
+        choices=["llama", "qwen1", "qwen2", "qwen2vl", "gemma", "phi", "opt", "mixtral", "falcon"],
         default="llama",
     )
     parser.add_argument("--scale_file", type=argparse.FileType("r"))
-    parser.add_argument("--t01m_clip_threshold", type=int, default=152)
+    parser.add_argument("--t01m_clip_threshold", type=int, default=32)
     parser.add_argument("--output_model", type=str, default="model-int8.mllm")
     args = parser.parse_args()
 
@@ -58,7 +59,13 @@ if __name__ == "__main__":
     act_dict = args.scale_file.name
     t01m_clip_threshold = args.t01m_clip_threshold
 
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+    if args.model_type != "qwen2vl":
+        model = AutoModelForCausalLM.from_pretrained(model_name)
+    else:
+        from transformers import Qwen2VLForConditionalGeneration
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            model_name
+        )
     act_dict = json.load(open(act_dict))
 
     act_scales, clip_top, return_dict = get_clip_and_scale(
@@ -77,6 +84,8 @@ if __name__ == "__main__":
         q_model = quantize_llama_like(model, act_scales, layer_clip=clip_top)
     elif args.model_type == "qwen2" or args.model_type == "qwen1":
         q_model = quantize_qwen2_like(model, act_scales, layer_clip=clip_top)
+    elif args.model_type == "qwen2vl":
+        q_model = quantize_qwen2vl_like(model, act_scales, layer_clip=clip_top)
     elif args.model_type == "gemma":
         q_model = quantize_gemma_like(model, act_scales, layer_clip=clip_top)
     elif args.model_type == "phi":
@@ -96,12 +105,13 @@ if __name__ == "__main__":
     for i in act_scales:
         model_dict[i + ".input_scale"] = torch.tensor(act_scales[i]["input"])
         model_dict[i + ".output_scale"] = torch.tensor(act_scales[i]["output"])
+        print(i, " input scale: ", act_scales[i]["input"], " output scale: ", act_scales[i]["output"])
         model_dict[i + ".clip_input"] = torch.tensor(clip_top[i]["input"])
         model_dict[i + ".clip_output"] = torch.tensor(clip_top[i]["output"])
 
     new_model = {}
     for name, param in model_dict.items():
-        if "vision_tower" in name or "lm_head" in name:
+        if "vision_tower" in name or "visual" in name or "lm_head" in name:
             new_model[name] = param
             continue
         if name.replace(".weight", "") in act_scales:

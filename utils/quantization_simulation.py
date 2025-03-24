@@ -22,7 +22,7 @@ def simulate_quantize_weight_per_tensor_absmax(w, n_bits=8):
     scales = w.abs().max()
     q_max = 2 ** (n_bits - 1) - 1
     scales.clamp_(min=1e-5).div_(q_max)
-    w.div_(scales).round_().mul_(scales)
+    w.div_(scales).round_().clamp_(-128.0, 127.0).mul_(scales)
     return w
 
 
@@ -108,6 +108,8 @@ class W8A8LinearStatic(nn.Module):
         self.weight_scale = None
         self.weight_quant_type = None
 
+        self.printAct = False
+
         self.register_buffer(
             "weight",
             torch.randn(
@@ -152,6 +154,9 @@ class W8A8LinearStatic(nn.Module):
         y = torch.functional.F.linear(q_x, self.weight, self.bias)
         q_y = self.act_quant_output(y, scale=self.output_scale)
 
+        if self.printAct:
+            print(q_y)
+
         return q_y
 
     @staticmethod
@@ -179,6 +184,39 @@ class W8A8LinearStatic(nn.Module):
             raise ValueError(f"Invalid weight_quant: {weight_quant_type}")
 
         new_module.weight_quant_name = weight_quant_type
+
+        if module.bias is not None:
+            new_module.bias = simulate_quantize_weight_per_tensor_absmax(module.bias, n_bits=8)
+
+        return new_module
+    
+
+    @staticmethod
+    def from_float_and_print(module, scales, weight_quant_type="per_tensor", clip_top=False):
+        assert isinstance(module, torch.nn.Linear)
+
+        new_module = W8A8LinearStatic(
+            module.in_features,
+            module.out_features,
+            bias=module.bias is not None,
+            input_scale=scales["input"],
+            output_scale=scales["output"],
+            clip_top=clip_top,
+        )
+
+        if weight_quant_type == "per_channel":
+            new_module.weight = simulate_quantize_weight_per_channel_absmax(
+                module.weight, n_bits=8
+            )  # use 8-bit integer for weight
+        elif weight_quant_type == "per_tensor":
+            new_module.weight = simulate_quantize_weight_per_tensor_absmax(
+                module.weight, n_bits=8
+            )
+        else:
+            raise ValueError(f"Invalid weight_quant: {weight_quant_type}")
+
+        new_module.weight_quant_name = weight_quant_type
+        new_module.printAct = True
 
         if module.bias is not None:
             new_module.bias = simulate_quantize_weight_per_tensor_absmax(module.bias, n_bits=8)
@@ -366,6 +404,68 @@ def quantize_qwen2_like(
                 weight_quant_type=weight_quant,
                 clip_top=layer_clip["model." + name + ".v_proj"],
             )
+            m.o_proj = W8A8LinearStatic.from_float(
+                m.o_proj,
+                decoder_scales["model." + name + ".o_proj"],
+                weight_quant_type=weight_quant,
+                clip_top=layer_clip["model." + name + ".o_proj"],
+            )
+    return model
+
+def quantize_qwen2vl_like(
+    model,
+    decoder_scales,
+    weight_quant="per_tensor",
+    act_quant="per_tensor",
+    quantize_bmm_input=False,
+    layer_clip={},
+):
+    from transformers.models.qwen2_vl.modeling_qwen2_vl import (
+        Qwen2VLSdpaAttention,
+        Qwen2MLP,
+    )
+
+    for name, m in model.model.named_modules():
+        if isinstance(m, Qwen2MLP):
+            m.gate_proj = W8A8LinearStatic.from_float(
+                m.gate_proj,
+                decoder_scales["model." + name + ".gate_proj"],
+                weight_quant_type=weight_quant,
+                clip_top=layer_clip["model." + name + ".gate_proj"],
+            )
+            m.up_proj = W8A8LinearStatic.from_float(
+                m.up_proj,
+                decoder_scales["model." + name + ".up_proj"],
+                weight_quant_type=weight_quant,
+                clip_top=layer_clip["model." + name + ".up_proj"],
+            )
+            m.down_proj = W8A8LinearStatic.from_float(
+                m.down_proj,
+                decoder_scales["model." + name + ".down_proj"],
+                weight_quant_type=weight_quant,
+                clip_top=layer_clip["model." + name + ".down_proj"],
+            )
+        elif isinstance(m, Qwen2VLSdpaAttention):
+            # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
+            m.q_proj = W8A8LinearStatic.from_float(
+                m.q_proj,
+                decoder_scales["model." + name + ".q_proj"],
+                weight_quant_type=weight_quant,
+                clip_top=layer_clip["model." + name + ".q_proj"],
+            )
+            m.k_proj = W8A8LinearStatic.from_float(
+                m.k_proj,
+                decoder_scales["model." + name + ".k_proj"],
+                weight_quant_type=weight_quant,
+                clip_top=layer_clip["model." + name + ".k_proj"],
+            )
+            m.v_proj = W8A8LinearStatic.from_float(
+                m.v_proj,
+                decoder_scales["model." + name + ".v_proj"],
+                weight_quant_type=weight_quant,
+                clip_top=layer_clip["model." + name + ".v_proj"],
+            )
+            
             m.o_proj = W8A8LinearStatic.from_float(
                 m.o_proj,
                 decoder_scales["model." + name + ".o_proj"],

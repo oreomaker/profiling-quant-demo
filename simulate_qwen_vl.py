@@ -39,13 +39,13 @@ if __name__ == "__main__":
     global args
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default='/workspace/Qwen2-VL-2B-Instruct')
-    parser.add_argument("--scale_file", type=argparse.FileType("r"), default='/workspace/profilling_act/assets/qwen2_vl_2b_dis.json')
-    parser.add_argument("--t01m_clip_threshold", type=int, default=128)
+    parser.add_argument("--scale_file", type=argparse.FileType("r"), default='/workspace/profilling_act/assets/qwen2_vl_2b_dis-0001.json')
+    parser.add_argument("--t01m_clip_threshold", type=int, default=64)
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     model = Qwen2VLForConditionalGeneration.from_pretrained(
-        args.model_name, device_map="cuda"
+        args.model_name, torch_dtype=torch.float32, device_map="cuda"
     )
     act_dict = json.load(open(args.scale_file.name))
 
@@ -87,6 +87,6 @@ if __name__ == "__main__":
 
     with torch.no_grad():
         output = q_model.generate(
-            **inputs, max_new_tokens=1, do_sample=False, top_p=None, top_k=None
+            **inputs, max_new_tokens=100, do_sample=False, top_p=None, top_k=None
         )
     print(tokenizer.decode(output[0], skip_special_tokens=True))
